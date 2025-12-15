@@ -1,0 +1,7 @@
+google-cloud-storage>=2.10.0
+google-cloud-secret-manager>=2.16.0
+pinecone>=5.0.0
+requests>=2.31.0
+functions-framework>=3.5.0
+flask>=3.0.0
+
