@@ -98,6 +98,9 @@ The following secrets must be configured in Google Secret Manager:
 - `PINECONE_API_KEY` - Pinecone API key
 - `PINECONE_ALL_MINILM_L6_V2_INDEX` - Name of the Pinecone index
 - `KB_INGEST_SA` - Service account JSON (base64 encoded or file path)
+- `POSTGRES_URL` - PostgreSQL database connection URL (for VectorDB ingestion logging)
+
+**Note:** The `POSTGRES_URL` secret is required for database logging. If not configured, ingestion will still work but won't log to the database. Check Cloud Function logs for database connection errors.
 
 ## Project Structure
 

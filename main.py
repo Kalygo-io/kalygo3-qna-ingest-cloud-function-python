@@ -7,6 +7,8 @@ from helpers.gcs import download_file_from_gcs, file_exists_in_gcs
 from helpers.csv_processor import process_csv_file
 from helpers.pinecone import upsert_vectors, ProcessingResult
 from helpers.get_secret import get_secret
+from helpers.db_logger import VectorDbLogger
+from db.enums import OperationType, OperationStatus
 from singletons.environment_variables import EnvironmentVariables
 
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +30,7 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
     message = "{}"
     attributes: Dict[str, str] = {}
     is_http_trigger = False
+    db_logger = None  # Initialize for exception handler
     
     try:
         # Load secrets (with error handling in case Secret Manager is not accessible during import)
@@ -165,6 +168,41 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         if not csv_content.strip():
             raise ValueError("CSV file is empty")
         
+        # Initialize database logger for tracking ingestion
+        logger.info(f"Initializing database logger - user_id: {user_id}, user_email: {user_email}")
+        try:
+            account_id = int(user_id) if user_id else None
+            logger.info(f"Parsed account_id: {account_id}")
+            
+            if not account_id:
+                logger.warning(f"⚠️  Cannot create log entry: user_id is missing or invalid ({user_id})")
+                db_logger = None
+            else:
+                logger.info(f"Creating VectorDbLogger for account_id={account_id}")
+                db_logger = VectorDbLogger(
+                    account_id=account_id,
+                    provider="pinecone"
+                )
+                # Create log entry with PENDING status
+                log_entry = db_logger.create_log_entry(
+                    operation_type=OperationType.INGEST,
+                    index_name=EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX,
+                    namespace=namespace,
+                    filenames=[filename],
+                    comment=f"Processing CSV file: {filename}",
+                    status=OperationStatus.PENDING
+                )
+                
+                if log_entry:
+                    logger.info(f"✅ Database log entry created successfully: {log_entry.id}")
+                else:
+                    logger.warning("⚠️  Database log entry creation returned None - check logs for errors")
+                    # If log entry creation failed, set db_logger to None so we don't try to update it
+                    db_logger = None
+        except Exception as db_error:
+            logger.error(f"❌ Failed to initialize database logger: {db_error}", exc_info=True)
+            db_logger = None
+        
         # Step 2: Parse CSV and generate embeddings
         logger.info(f"Step 2: Processing CSV file: {filename}")
         result_data = process_csv_file(
@@ -182,7 +220,25 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         # Step 3: Insert embeddings into Pinecone
         logger.info(f"Step 3: Inserting {len(vectors)} vectors into Pinecone")
         if len(vectors) > 0:
-            upsert_vectors(vectors, namespace)
+            try:
+                upsert_vectors(vectors, namespace)
+                
+                # Log success to database
+                if db_logger:
+                    db_logger.log_success(
+                        vectors_added=successful_rows,
+                        vectors_failed=failed_rows,
+                        comment=f"Successfully ingested {successful_rows} vectors from {filename}"
+                    )
+            except Exception as upsert_error:
+                # Log failure to database
+                if db_logger:
+                    db_logger.log_failure(
+                        error_message=str(upsert_error),
+                        vectors_added=0,
+                        vectors_failed=len(vectors)
+                    )
+                raise
         
         # Prepare result
         result: ProcessingResult = {
@@ -205,6 +261,18 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         
     except Exception as error:
         logger.error(f"Error processing message: {error}", exc_info=True)
+        
+        # Log failure to database if logger was initialized
+        try:
+            if 'db_logger' in locals() and db_logger and db_logger._log_entry:
+                db_logger.log_failure(
+                    error_message=str(error),
+                    error_code=type(error).__name__,
+                    vectors_added=0,
+                    vectors_failed=0
+                )
+        except Exception as log_error:
+            logger.warning(f"Failed to log error to database: {log_error}")
         
         # Log the message that caused the error for debugging
         try:
