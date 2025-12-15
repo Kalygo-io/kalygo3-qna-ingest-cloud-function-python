@@ -20,15 +20,16 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
         The embedding vector as a list of floats
     """
     try:
-        embeddings_api_url = EnvironmentVariables.EMBEDDINGS_API_URL or \
+        embeddings_api_url = f'{EnvironmentVariables.EMBEDDINGS_API_URL}/huggingface/embedding' or \
             'https://kalygo-embeddings-service-830723611668.us-east1.run.app/huggingface/embedding'
+            # https://kalygo-embeddings-service-830723611668.us-east1.run.app/
         
         response = requests.post(
             embeddings_api_url,
             json={'input': text},
             headers={
                 'Content-Type': 'application/json',
-                'Cookie': f'jwt={jwt}'
+                'Authorization': f'Bearer {jwt}'
             },
             timeout=120  # 120 second timeout
         )

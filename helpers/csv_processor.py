@@ -143,6 +143,9 @@ def generate_embedding_for_row(
             'last_edited_at': row.last_edited_at,
         }
         
+        # Filter out None values (Pinecone doesn't accept null metadata values)
+        metadata = {k: v for k, v in metadata.items() if v is not None}
+        
         # Prepare vector data
         vector_data: VectorData = {
             'id': chunk_id,

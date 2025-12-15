@@ -23,25 +23,21 @@ Note: `requirements.txt` is maintained for Google Cloud Functions deployment com
 
 ### Run locally with Functions Framework
 
+The function automatically detects HTTP vs Pub/Sub triggers (matching the Node.js implementation).
+
 **Using UV:**
 
 ```sh
-# Pub/Sub-triggered function
 uv run functions-framework --target=process_qna_ingest_topic_message --source=main.py
-
-# HTTP-triggered function (for local testing)
-uv run functions-framework --target=process_qna_ingest_http --source=main_http.py
 ```
 
 **Using pip:**
 
 ```sh
-# Pub/Sub-triggered function
 functions-framework --target=process_qna_ingest_topic_message --source=main.py
-
-# HTTP-triggered function (for local testing)
-functions-framework --target=process_qna_ingest_http --source=main_http.py
 ```
+
+The function will automatically handle both HTTP requests (for local testing) and Pub/Sub events (in production).
 
 ## Set up a topic
 
@@ -107,8 +103,7 @@ The following secrets must be configured in Google Secret Manager:
 
 ```
 .
-├── main.py                 # Pub/Sub-triggered entry point
-├── main_http.py           # HTTP-triggered entry point (for local testing)
+├── main.py                 # Entry point (handles both HTTP and Pub/Sub triggers)
 ├── requirements.txt       # Python dependencies
 ├── helpers/               # Helper modules
 │   ├── csv_processor.py   # CSV parsing and processing

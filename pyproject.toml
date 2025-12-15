@@ -22,6 +22,5 @@ packages = ["helpers", "clients", "singletons"]
 # Include root-level Python files
 include = [
     "main.py",
-    "main_http.py",
 ]
 
