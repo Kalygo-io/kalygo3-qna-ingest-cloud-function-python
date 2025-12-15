@@ -24,6 +24,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv/  # UV default virtual environment
 
 # IDE
 .vscode/

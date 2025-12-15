@@ -6,21 +6,40 @@ Cloud Function for ingesting QnA knowledge stored in a .csv into a Pinecone Vect
 
 ### Install dependencies
 
+**Using UV (recommended, consistent with other Kalygo projects):**
+
+```sh
+# Install UV if you haven't already: curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+```
+
+**Using pip (alternative):**
+
 ```sh
 pip install -r requirements.txt
 ```
 
+Note: `requirements.txt` is maintained for Google Cloud Functions deployment compatibility, but `pyproject.toml` is the source of truth for development.
+
 ### Run locally with Functions Framework
 
-For Pub/Sub-triggered function (simulating Pub/Sub messages):
+**Using UV:**
 
 ```sh
-functions-framework --target=process_qna_ingest_topic_message --source=main.py
+# Pub/Sub-triggered function
+uv run functions-framework --target=process_qna_ingest_topic_message --source=main.py
+
+# HTTP-triggered function (for local testing)
+uv run functions-framework --target=process_qna_ingest_http --source=main_http.py
 ```
 
-For HTTP-triggered function (for local testing):
+**Using pip:**
 
 ```sh
+# Pub/Sub-triggered function
+functions-framework --target=process_qna_ingest_topic_message --source=main.py
+
+# HTTP-triggered function (for local testing)
 functions-framework --target=process_qna_ingest_http --source=main_http.py
 ```
 
