@@ -103,6 +103,14 @@ def generate_embedding_for_row(
         VectorData dictionary or None if embedding generation fails
     """
     try:
+
+        print('--- --- --- --- ---')
+        print(f'Generating embedding for row {row.row_number}')
+        print('--- --- --- --- ---')
+        logger.info(f'--- --- --- --- ---')
+        logger.info(f'Generating embedding for row {row.row_number}')
+        logger.info(f'--- --- --- --- ---')
+
         # Generate embedding for the content
         embedding = fetch_embedding(jwt, row.content)
         
