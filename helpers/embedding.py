@@ -40,6 +40,27 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
             timeout=120  # 120 second timeout
         )
         
+        # Check for HTTP errors and provide detailed error messages
+        if response.status_code == 401:
+            error_detail = "Unauthorized - Invalid or expired JWT token"
+            logger.error(f'❌ Embedding API returned 401: {error_detail}')
+            raise Exception(f'Authentication failed: {error_detail}. Please check your JWT token.')
+        elif response.status_code == 403:
+            error_detail = "Forbidden - Insufficient permissions"
+            logger.error(f'❌ Embedding API returned 403: {error_detail}')
+            raise Exception(f'Authorization failed: {error_detail}')
+        elif response.status_code == 429:
+            error_detail = "Rate limit exceeded"
+            logger.error(f'❌ Embedding API returned 429: {error_detail}')
+            raise Exception(f'Rate limit exceeded: {error_detail}. Please retry later.')
+        elif response.status_code >= 400:
+            try:
+                error_detail = response.json().get('error', response.text)
+            except:
+                error_detail = response.text
+            logger.error(f'❌ Embedding API returned {response.status_code}: {error_detail}')
+            raise Exception(f'Embedding API error ({response.status_code}): {error_detail}')
+        
         response.raise_for_status()
         
         logger.info(f'Embedding API response structure: {list(response.json().keys())}')
@@ -86,7 +107,22 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
         
         return flattened_embedding
         
+    except requests.exceptions.Timeout:
+        error_msg = 'Embedding API request timed out after 120 seconds'
+        logger.error(f'❌ {error_msg}')
+        raise Exception(error_msg)
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f'Failed to connect to embedding API: {str(e)}'
+        logger.error(f'❌ {error_msg}')
+        raise Exception(error_msg)
+    except requests.exceptions.RequestException as e:
+        error_msg = f'Embedding API request failed: {str(e)}'
+        logger.error(f'❌ {error_msg}')
+        raise Exception(error_msg)
     except Exception as error:
-        logger.error(f'Error fetching embedding: {error}', exc_info=True)
+        logger.error(f'❌ Error fetching embedding: {error}', exc_info=True)
+        # Preserve original error message if it's already descriptive
+        if isinstance(error, Exception) and str(error):
+            raise
         raise Exception(f'Failed to fetch embedding: {str(error)}')
 

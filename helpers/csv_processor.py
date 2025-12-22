@@ -87,7 +87,8 @@ def generate_embedding_for_row(
     filename: str,
     user_id: str,
     user_email: str,
-    jwt: str
+    jwt: str,
+    db_logger=None
 ) -> Optional[VectorData]:
     """
     Generate embedding for a single row and prepare vector data.
@@ -98,6 +99,7 @@ def generate_embedding_for_row(
         user_id: User ID
         user_email: User email
         jwt: JWT token for embedding API
+        db_logger: Optional VectorDbLogger instance for error logging
         
     Returns:
         VectorData dictionary or None if embedding generation fails
@@ -163,7 +165,24 @@ def generate_embedding_for_row(
         
         return vector_data
     except Exception as error:
-        logger.error(f'Error processing row {row.row_number}:', exc_info=True)
+        error_msg = f'Error processing row {row.row_number}: {str(error)}'
+        logger.error(f'❌ {error_msg}', exc_info=True)
+        
+        # Log error to database if logger is available
+        if db_logger:
+            try:
+                # Increment failed vectors count and update status to PARTIAL if not already FAILED
+                # Note: We don't set status to FAILED here because the overall operation might still succeed
+                # The final status will be set in main.py based on overall success/failure
+                db_logger.update_log_entry(
+                    vectors_failed=1,
+                    error_message=error_msg,
+                    error_code=type(error).__name__
+                )
+                logger.info(f"✅ Logged row {row.row_number} error to database")
+            except Exception as log_error:
+                logger.error(f'❌ Failed to log row error to database: {log_error}', exc_info=True)
+        
         return None
 
 
@@ -172,7 +191,8 @@ def process_csv_file(
     filename: str,
     user_id: str,
     user_email: str,
-    jwt: str
+    jwt: str,
+    db_logger=None
 ) -> Dict[str, Any]:
     """
     Process CSV file and generate embeddings for all rows.
@@ -183,6 +203,7 @@ def process_csv_file(
         user_id: User ID
         user_email: User email
         jwt: JWT token for embedding API
+        db_logger: Optional VectorDbLogger instance for error logging
         
     Returns:
         Dictionary with 'vectors', 'successful_rows', and 'failed_rows'
@@ -211,7 +232,8 @@ def process_csv_file(
                 filename,
                 user_id,
                 user_email,
-                jwt
+                jwt,
+                db_logger
             )
             
             if vector_data:
@@ -230,6 +252,20 @@ def process_csv_file(
             'failed_rows': failed_rows,
         }
     except Exception as error:
-        logger.error('Error processing CSV file:', exc_info=True)
-        raise
+        error_msg = f'Error processing CSV file: {str(error)}'
+        logger.error(f'❌ {error_msg}', exc_info=True)
+        
+        # Log error to database if logger is available
+        if db_logger:
+            try:
+                db_logger.log_failure(
+                    error_message=error_msg,
+                    error_code=type(error).__name__,
+                    vectors_added=successful_rows,
+                    vectors_failed=failed_rows
+                )
+            except Exception as log_error:
+                logger.warning(f'Failed to log CSV processing error to database: {log_error}')
+        
+        raise Exception(error_msg) from error
 

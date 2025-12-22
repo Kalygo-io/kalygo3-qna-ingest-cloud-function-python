@@ -157,16 +157,57 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         
         # Step 1: Download file from GCS
         logger.info(f"Step 1: Downloading file from GCS: gs://{gcs_bucket}/{gcs_file_path}")
-        
-        # Check if file exists first
-        file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path)
-        if not file_exists:
-            raise FileNotFoundError(f"File does not exist in GCS: gs://{gcs_bucket}/{gcs_file_path}")
-        
-        csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path)
-        
-        if not csv_content.strip():
-            raise ValueError("CSV file is empty")
+        try:
+            # Check if file exists first
+            file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path)
+            if not file_exists:
+                error_msg = f"File does not exist in GCS: gs://{gcs_bucket}/{gcs_file_path}"
+                logger.error(f"❌ {error_msg}")
+                if db_logger:
+                    try:
+                        db_logger.log_failure(
+                            error_message=error_msg,
+                            error_code="FileNotFoundError",
+                            vectors_added=0,
+                            vectors_failed=0
+                        )
+                    except Exception as log_error:
+                        logger.warning(f"Failed to log GCS error to database: {log_error}")
+                raise FileNotFoundError(error_msg)
+            
+            csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path)
+            
+            if not csv_content.strip():
+                error_msg = "CSV file is empty"
+                logger.error(f"❌ {error_msg}")
+                if db_logger:
+                    try:
+                        db_logger.log_failure(
+                            error_message=error_msg,
+                            error_code="ValueError",
+                            vectors_added=0,
+                            vectors_failed=0
+                        )
+                    except Exception as log_error:
+                        logger.warning(f"Failed to log empty file error to database: {log_error}")
+                raise ValueError(error_msg)
+        except (FileNotFoundError, ValueError) as gcs_error:
+            # Re-raise validation errors
+            raise
+        except Exception as gcs_error:
+            error_msg = f"Failed to download file from GCS: {str(gcs_error)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+            if db_logger:
+                try:
+                    db_logger.log_failure(
+                        error_message=error_msg,
+                        error_code=type(gcs_error).__name__,
+                        vectors_added=0,
+                        vectors_failed=0
+                    )
+                except Exception as log_error:
+                    logger.warning(f"Failed to log GCS download error to database: {log_error}")
+            raise Exception(error_msg) from gcs_error
         
         # Initialize database logger for tracking ingestion
         logger.info(f"Initializing database logger - user_id: {user_id}, user_email: {user_email}")
@@ -205,13 +246,28 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         
         # Step 2: Parse CSV and generate embeddings
         logger.info(f"Step 2: Processing CSV file: {filename}")
-        result_data = process_csv_file(
-            csv_content,
-            filename,
-            user_id,
-            user_email,
-            jwt
-        )
+        try:
+            result_data = process_csv_file(
+                csv_content,
+                filename,
+                user_id,
+                user_email,
+                jwt,
+                db_logger  # Pass db_logger for error tracking
+            )
+        except Exception as csv_error:
+            # Log CSV processing error to database
+            if db_logger:
+                try:
+                    db_logger.log_failure(
+                        error_message=f"CSV processing failed: {str(csv_error)}",
+                        error_code=type(csv_error).__name__,
+                        vectors_added=0,
+                        vectors_failed=0
+                    )
+                except Exception as log_error:
+                    logger.warning(f"Failed to log CSV error to database: {log_error}")
+            raise
         
         vectors = result_data['vectors']
         successful_rows = result_data['successful_rows']
@@ -225,20 +281,50 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                 
                 # Log success to database
                 if db_logger:
-                    db_logger.log_success(
-                        vectors_added=successful_rows,
-                        vectors_failed=failed_rows,
-                        comment=f"Successfully ingested {successful_rows} vectors from {filename}"
-                    )
+                    try:
+                        db_logger.log_success(
+                            vectors_added=successful_rows,
+                            vectors_failed=failed_rows,  # Use failed_rows from result_data
+                            comment=f"Successfully ingested {successful_rows} vectors from {filename}"
+                        )
+                        logger.info(f"✅ Success logged to database: {successful_rows} vectors added, {failed_rows} failed")
+                    except Exception as log_error:
+                        logger.error(f"❌ Failed to log success to database: {log_error}", exc_info=True)
             except Exception as upsert_error:
+                error_msg = f"Failed to upsert vectors to Pinecone: {str(upsert_error)}"
+                logger.error(f"❌ {error_msg}", exc_info=True)
+                
                 # Log failure to database
                 if db_logger:
+                    try:
+                        db_logger.log_failure(
+                            error_message=error_msg,
+                            error_code=type(upsert_error).__name__,
+                            vectors_added=successful_rows,  # Count vectors that were generated successfully
+                            vectors_failed=failed_rows + len(vectors)  # Failed during processing + failed to upsert
+                        )
+                        logger.info(f"✅ Failure logged to database: {error_msg[:100]}, {successful_rows} added, {failed_rows + len(vectors)} failed")
+                    except Exception as log_error:
+                        logger.error(f"❌ Failed to log Pinecone error to database: {log_error}", exc_info=True)
+                raise Exception(error_msg) from upsert_error
+        else:
+            # No vectors to insert - log as failure
+            error_msg = f"No vectors generated from CSV file. {failed_rows} row(s) failed to process."
+            logger.warning(f"⚠️  {error_msg}")
+            if db_logger:
+                try:
+                    # Use failed_rows from result_data - this includes all rows that failed during embedding generation
                     db_logger.log_failure(
-                        error_message=str(upsert_error),
+                        error_message=error_msg,
+                        error_code="NoVectorsGenerated",
                         vectors_added=0,
-                        vectors_failed=len(vectors)
+                        vectors_failed=failed_rows  # Use actual failed_rows count
                     )
-                raise
+                    logger.info(f"✅ Failure logged to database: {failed_rows} rows failed, 0 vectors added")
+                except Exception as log_error:
+                    logger.error(f"❌ Failed to log no-vectors error to database: {log_error}", exc_info=True)
+            # Raise exception so the catch-all handler also logs this
+            raise Exception(error_msg)
         
         # Prepare result
         result: ProcessingResult = {
@@ -260,19 +346,57 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
             return result
         
     except Exception as error:
-        logger.error(f"Error processing message: {error}", exc_info=True)
+        error_msg = str(error)
+        error_code = type(error).__name__
+        logger.error(f"❌ Error processing message: {error_msg}", exc_info=True)
         
-        # Log failure to database if logger was initialized
+        # Log failure to database - catch-all error handler
         try:
-            if 'db_logger' in locals() and db_logger and db_logger._log_entry:
-                db_logger.log_failure(
-                    error_message=str(error),
-                    error_code=type(error).__name__,
-                    vectors_added=0,
-                    vectors_failed=0
-                )
-        except Exception as log_error:
-            logger.warning(f"Failed to log error to database: {log_error}")
+            # Try to log using db_logger if it exists and has a log entry
+            if db_logger and db_logger.log_entry_id:
+                try:
+                    db_logger.log_failure(
+                        error_message=error_msg,
+                        error_code=error_code,
+                        vectors_added=0,
+                        vectors_failed=0
+                    )
+                    logger.info(f"✅ Error logged to database: {error_code}")
+                except Exception as log_error:
+                    logger.error(f"❌ Failed to update log entry: {log_error}", exc_info=True)
+            elif db_logger:
+                # Try to use safe error logging (creates entry if needed)
+                try:
+                    db_logger.log_error_safe(
+                        error_message=error_msg,
+                        error_code=error_code,
+                        vectors_added=0,
+                        vectors_failed=0,
+                        comment=f"Error during ingestion: {error_msg[:200]}"
+                    )
+                    logger.info(f"✅ Error logged to database using safe method: {error_code}")
+                except Exception as safe_log_error:
+                    logger.error(f"❌ Failed to log error safely: {safe_log_error}", exc_info=True)
+            else:
+                # db_logger was never initialized - try to create one now for error logging
+                try:
+                    account_id = int(user_id) if user_id else None
+                    if account_id:
+                        logger.info(f"Attempting to create db_logger for error logging (account_id={account_id})")
+                        from helpers.db_logger import VectorDbLogger
+                        error_logger = VectorDbLogger(account_id=account_id, provider="pinecone")
+                        error_logger.log_error_safe(
+                            error_message=error_msg,
+                            error_code=error_code,
+                            vectors_added=0,
+                            vectors_failed=0,
+                            comment=f"Error during ingestion (logger created post-error): {error_msg[:200]}"
+                        )
+                        logger.info(f"✅ Error logged to database using post-error logger: {error_code}")
+                except Exception as post_error_log_error:
+                    logger.error(f"❌ Failed to create post-error logger: {post_error_log_error}", exc_info=True)
+        except Exception as catch_all_log_error:
+            logger.error(f"❌ Catch-all error logging failed: {catch_all_log_error}", exc_info=True)
         
         # Log the message that caused the error for debugging
         try:
