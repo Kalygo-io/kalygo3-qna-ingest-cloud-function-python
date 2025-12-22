@@ -25,8 +25,6 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
         print('--- --- --- --- ---')
         print(f'Embedding API URL: {EnvironmentVariables.EMBEDDINGS_API_URL}')
         print('--- --- --- --- ---')
-        print(f'JWT: {jwt}')
-        print('--- --- --- --- ---')
 
         embeddings_api_url = f'{EnvironmentVariables.EMBEDDINGS_API_URL}/huggingface/embedding'
         
