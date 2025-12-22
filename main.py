@@ -31,6 +31,8 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
     attributes: Dict[str, str] = {}
     is_http_trigger = False
     db_logger = None  # Initialize for exception handler
+    failed_rows_count = 0  # Track failed rows for exception handler
+    successful_rows_count = 0  # Track successful rows for exception handler
     
     try:
         # Load secrets (with error handling in case Secret Manager is not accessible during import)
@@ -225,6 +227,11 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                     provider="pinecone"
                 )
                 # Create log entry with PENDING status
+                logger.info(f"🔵 [MAIN] Creating initial log entry with PENDING status...")
+                logger.info(f"   Index: {EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}")
+                logger.info(f"   Namespace: {namespace}, Filename: {filename}")
+                logger.info(f"   Account ID: {account_id}")
+                
                 log_entry = db_logger.create_log_entry(
                     operation_type=OperationType.INGEST,
                     index_name=EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX,
@@ -234,15 +241,37 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                     status=OperationStatus.PENDING
                 )
                 
-                if log_entry:
-                    logger.info(f"✅ Database log entry created successfully: {log_entry.id}")
+                logger.info(f"🔵 [MAIN] create_log_entry() returned: {log_entry}")
+                logger.info(f"   db_logger.log_entry_id: {db_logger.log_entry_id}")
+                
+                if log_entry and db_logger.log_entry_id:
+                    logger.info(f"✅ [MAIN] Database log entry created successfully: {log_entry.id}")
+                    logger.info(f"   Status: {log_entry.status}")
+                    logger.info(f"   Stored context - index: {db_logger._index_name}, namespace: {db_logger._namespace}")
                 else:
-                    logger.warning("⚠️  Database log entry creation returned None - check logs for errors")
-                    # If log entry creation failed, set db_logger to None so we don't try to update it
-                    db_logger = None
+                    logger.error(f"❌ [MAIN] CRITICAL: Log entry creation failed or log_entry_id not set!")
+                    logger.error(f"   log_entry object: {log_entry}")
+                    logger.error(f"   log_entry_id: {db_logger.log_entry_id if db_logger else None}")
+                    logger.error(f"   This means the initial PENDING entry was NOT created")
+                    logger.error(f"   Will attempt to create FAILED entry in catch-all handler")
+                    # Don't set db_logger to None - keep it so we can try to create error entry later
+                    # The context is already stored in db_logger (or will be stored manually)
         except Exception as db_error:
             logger.error(f"❌ Failed to initialize database logger: {db_error}", exc_info=True)
-            db_logger = None
+            # Try to create a logger anyway if we have account_id
+            try:
+                account_id = int(user_id) if user_id else None
+                if account_id:
+                    logger.info(f"Attempting to create db_logger after error: {account_id}")
+                    db_logger = VectorDbLogger(account_id=account_id, provider="pinecone")
+                    # Store context manually since create_log_entry failed
+                    db_logger._index_name = EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX
+                    db_logger._namespace = namespace
+                    db_logger._filenames = [filename]
+                else:
+                    db_logger = None
+            except Exception:
+                db_logger = None
         
         # Step 2: Parse CSV and generate embeddings
         logger.info(f"Step 2: Processing CSV file: {filename}")
@@ -272,6 +301,10 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         vectors = result_data['vectors']
         successful_rows = result_data['successful_rows']
         failed_rows = result_data['failed_rows']
+        
+        # Store for exception handler
+        successful_rows_count = successful_rows
+        failed_rows_count = failed_rows
         
         # Step 3: Insert embeddings into Pinecone
         logger.info(f"Step 3: Inserting {len(vectors)} vectors into Pinecone")
@@ -313,16 +346,30 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
             logger.warning(f"⚠️  {error_msg}")
             if db_logger:
                 try:
+                    logger.info(f"🔴 [MAIN] No vectors generated - calling log_failure()")
+                    logger.info(f"   db_logger exists: {db_logger is not None}")
+                    logger.info(f"   log_entry_id: {db_logger.log_entry_id}")
+                    logger.info(f"   failed_rows: {failed_rows}")
+                    logger.info(f"   error_msg: {error_msg}")
+                    
                     # Use failed_rows from result_data - this includes all rows that failed during embedding generation
-                    db_logger.log_failure(
+                    result = db_logger.log_failure(
                         error_message=error_msg,
                         error_code="NoVectorsGenerated",
                         vectors_added=0,
                         vectors_failed=failed_rows  # Use actual failed_rows count
                     )
-                    logger.info(f"✅ Failure logged to database: {failed_rows} rows failed, 0 vectors added")
+                    
+                    logger.info(f"🔴 [MAIN] log_failure() returned: {result}")
+                    if result:
+                        logger.info(f"✅ [MAIN] Failure logged to database successfully: {failed_rows} rows failed, 0 vectors added")
+                    else:
+                        logger.error(f"❌ [MAIN] log_failure() returned False - update may have failed")
+                        logger.error(f"   This means the database update did not succeed")
                 except Exception as log_error:
-                    logger.error(f"❌ Failed to log no-vectors error to database: {log_error}", exc_info=True)
+                    logger.error(f"❌ [MAIN] Exception calling log_failure(): {log_error}", exc_info=True)
+                    logger.error(f"   Exception type: {type(log_error).__name__}")
+                    logger.error(f"   db_logger.log_entry_id: {db_logger.log_entry_id if db_logger else None}")
             # Raise exception so the catch-all handler also logs this
             raise Exception(error_msg)
         
@@ -352,38 +399,70 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         
         # Log failure to database - catch-all error handler
         try:
+            logger.info(f"Catch-all handler - db_logger exists: {db_logger is not None}, "
+                      f"log_entry_id: {db_logger.log_entry_id if db_logger else None}, "
+                      f"failed_rows_count: {failed_rows_count}, successful_rows_count: {successful_rows_count}")
+            
             # Try to log using db_logger if it exists and has a log entry
             if db_logger and db_logger.log_entry_id:
                 try:
-                    db_logger.log_failure(
+                    # Use the actual failed_rows_count if available, otherwise try to preserve existing count
+                    vectors_failed_to_log = failed_rows_count if failed_rows_count > 0 else 0
+                    vectors_added_to_log = successful_rows_count if successful_rows_count > 0 else 0
+                    
+                    logger.info(f"Updating existing log entry {db_logger.log_entry_id} with error: {error_code}, "
+                              f"vectors_added={vectors_added_to_log}, vectors_failed={vectors_failed_to_log}")
+                    
+                    result = db_logger.log_failure(
                         error_message=error_msg,
                         error_code=error_code,
-                        vectors_added=0,
-                        vectors_failed=0
+                        vectors_added=vectors_added_to_log,
+                        vectors_failed=vectors_failed_to_log
                     )
-                    logger.info(f"✅ Error logged to database: {error_code}")
+                    if result:
+                        logger.info(f"✅ Error logged to database successfully: {error_code}")
+                    else:
+                        logger.error(f"❌ log_failure() returned False - update may have failed")
                 except Exception as log_error:
                     logger.error(f"❌ Failed to update log entry: {log_error}", exc_info=True)
             elif db_logger:
+                logger.info(f"🔴 [MAIN] Path 2: db_logger exists BUT log_entry_id is None")
+                logger.info(f"   This means initial log entry creation failed or log_entry_id was lost")
+                logger.info(f"   Account ID: {db_logger.account_id}")
+                logger.info(f"   Failed rows: {failed_rows_count}")
+                logger.info(f"   Stored context - index: {db_logger._index_name}, namespace: {db_logger._namespace}")
+                
                 # Try to use safe error logging (creates entry if needed)
+                # This happens when log_entry_id is None (initial entry creation failed)
                 try:
-                    db_logger.log_error_safe(
+                    logger.warning(f"⚠️  [MAIN] Using log_error_safe() to create new entry")
+                    
+                    result = db_logger.log_error_safe(
                         error_message=error_msg,
                         error_code=error_code,
-                        vectors_added=0,
-                        vectors_failed=0,
+                        vectors_added=successful_rows_count if successful_rows_count > 0 else 0,
+                        vectors_failed=failed_rows_count if failed_rows_count > 0 else 0,
                         comment=f"Error during ingestion: {error_msg[:200]}"
                     )
-                    logger.info(f"✅ Error logged to database using safe method: {error_code}")
+                    
+                    logger.info(f"🔴 [MAIN] log_error_safe() returned: {result}")
+                    if result:
+                        logger.info(f"✅ [MAIN] Error logged to database using safe method: {error_code}")
+                    else:
+                        logger.error(f"❌ [MAIN] log_error_safe() returned False")
+                        logger.error(f"   This means error entry creation/update failed")
                 except Exception as safe_log_error:
-                    logger.error(f"❌ Failed to log error safely: {safe_log_error}", exc_info=True)
+                    logger.error(f"❌ [MAIN] Exception calling log_error_safe(): {safe_log_error}", exc_info=True)
+                    logger.error(f"   Exception type: {type(safe_log_error).__name__}")
+                    logger.error(f"   Exception args: {safe_log_error.args}")
             else:
                 # db_logger was never initialized - try to create one now for error logging
+                logger.info(f"🔴 [MAIN] Path 3: db_logger is None - creating new logger for error logging")
                 try:
                     account_id = int(user_id) if user_id else None
                     if account_id:
-                        logger.info(f"Attempting to create db_logger for error logging (account_id={account_id})")
-                        from helpers.db_logger import VectorDbLogger
+                        logger.info(f"🔴 [MAIN] Creating new VectorDbLogger for error logging (account_id={account_id})")
+                        # VectorDbLogger is already imported at the top of the file
                         error_logger = VectorDbLogger(account_id=account_id, provider="pinecone")
                         error_logger.log_error_safe(
                             error_message=error_msg,

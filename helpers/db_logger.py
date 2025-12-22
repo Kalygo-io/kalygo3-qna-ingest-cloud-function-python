@@ -31,6 +31,10 @@ class VectorDbLogger:
         self.batch_number = batch_number or str(uuid.uuid4())
         self._log_entry: Optional[VectorDbIngestionLog] = None
         self.log_entry_id: Optional[uuid.UUID] = None  # Track log entry ID separately for error handling
+        # Store context for error logging if initial entry creation fails
+        self._index_name: Optional[str] = None
+        self._namespace: Optional[str] = None
+        self._filenames: Optional[List[str]] = None
     
     def create_log_entry(
         self,
@@ -56,15 +60,19 @@ class VectorDbLogger:
             Created VectorDbIngestionLog instance or None if failed
         """
         try:
-            logger.info(f"Initializing database connection for logging (account_id={self.account_id})")
+            logger.info(f"🔵 [DB_LOGGER] Initializing database connection for logging")
+            logger.info(f"   Account ID: {self.account_id}, Index: {index_name}, Namespace: {namespace}")
+            logger.info(f"   Filenames: {filenames}, Status: {status.value}, Operation: {operation_type.value}")
+            
             init_database()
+            logger.info(f"🔵 [DB_LOGGER] Database initialized, getting session...")
             
             db_gen = get_db()
             db = next(db_gen)
+            logger.info(f"🔵 [DB_LOGGER] Database session obtained")
             
             try:
-                logger.info(f"Creating VectorDbIngestionLog entry: account_id={self.account_id}, "
-                          f"index_name={index_name}, namespace={namespace}, filenames={filenames}")
+                logger.info(f"🔵 [DB_LOGGER] Creating VectorDbIngestionLog entry...")
                 
                 log_entry = VectorDbIngestionLog(
                     operation_type=operation_type.value,
@@ -78,27 +86,48 @@ class VectorDbLogger:
                     batch_number=self.batch_number
                 )
                 
+                logger.info(f"🔵 [DB_LOGGER] Log entry object created, adding to session...")
                 db.add(log_entry)
+                logger.info(f"🔵 [DB_LOGGER] Committing transaction...")
                 db.commit()
+                logger.info(f"🔵 [DB_LOGGER] Transaction committed, refreshing object...")
                 db.refresh(log_entry)
                 
                 self._log_entry = log_entry
                 self.log_entry_id = log_entry.id
-                logger.info(f"✅ Successfully created log entry {log_entry.id} for {operation_type.value} operation")
+                # Store context for potential error logging
+                self._index_name = index_name
+                self._namespace = namespace
+                self._filenames = filenames
+                
+                logger.info(f"✅ [DB_LOGGER] Successfully created log entry!")
+                logger.info(f"   Log Entry ID: {log_entry.id}")
+                logger.info(f"   self.log_entry_id: {self.log_entry_id}")
+                logger.info(f"   Status: {log_entry.status}")
+                logger.info(f"   Stored context - index: {self._index_name}, namespace: {self._namespace}")
                 
                 return log_entry
             except Exception as e:
-                db.rollback()
-                logger.error(f"❌ Database transaction failed: {e}", exc_info=True)
+                logger.error(f"❌ [DB_LOGGER] Database transaction failed: {e}", exc_info=True)
+                logger.error(f"   Exception type: {type(e).__name__}")
+                logger.error(f"   Exception args: {e.args}")
+                try:
+                    db.rollback()
+                    logger.info(f"🔵 [DB_LOGGER] Transaction rolled back")
+                except Exception as rollback_error:
+                    logger.error(f"❌ [DB_LOGGER] Failed to rollback: {rollback_error}")
                 raise
             finally:
                 try:
                     db.close()
-                except Exception:
-                    pass
+                    logger.info(f"🔵 [DB_LOGGER] Database session closed")
+                except Exception as close_error:
+                    logger.warning(f"⚠️ [DB_LOGGER] Error closing session: {close_error}")
         except Exception as e:
-            logger.error(f"❌ Failed to create log entry: {e}", exc_info=True)
+            logger.error(f"❌ [DB_LOGGER] Failed to create log entry: {e}", exc_info=True)
+            logger.error(f"   Exception type: {type(e).__name__}")
             logger.error(f"   Account ID: {self.account_id}, Index: {index_name}, Namespace: {namespace}")
+            logger.error(f"   self.log_entry_id after failure: {self.log_entry_id}")
             # Don't raise - logging failures shouldn't break ingestion
             return None
     
@@ -128,23 +157,46 @@ class VectorDbLogger:
         Returns:
             True if update was successful, False otherwise
         """
+        logger.info(f"🔵 [DB_LOGGER] update_log_entry() called")
+        logger.info(f"   log_entry_id: {self.log_entry_id}")
+        logger.info(f"   Parameters - vectors_added: {vectors_added}, vectors_failed: {vectors_failed}")
+        logger.info(f"   status: {status.value if status else None}, error_code: {error_code}")
+        logger.info(f"   increment_counters: {increment_counters}")
+        logger.info(f"   error_message length: {len(error_message) if error_message else 0}")
+        
         if not self.log_entry_id:
-            logger.warning("No log entry ID available to update. Call create_log_entry first.")
+            logger.error(f"❌ [DB_LOGGER] No log entry ID available to update!")
+            logger.error(f"   self.log_entry_id: {self.log_entry_id}")
+            logger.error(f"   self._log_entry: {self._log_entry}")
             return False
         
         try:
+            logger.info(f"🔵 [DB_LOGGER] Initializing database for update...")
             init_database()
+            logger.info(f"🔵 [DB_LOGGER] Getting database session...")
             db_gen = get_db()
             db = next(db_gen)
+            logger.info(f"🔵 [DB_LOGGER] Database session obtained")
             
             try:
+                logger.info(f"🔵 [DB_LOGGER] Querying for log entry with ID: {self.log_entry_id}")
                 log_entry = db.query(VectorDbIngestionLog).filter(
                     VectorDbIngestionLog.id == self.log_entry_id
                 ).first()
                 
                 if not log_entry:
-                    logger.error(f"Log entry {self.log_entry_id} not found")
+                    logger.error(f"❌ [DB_LOGGER] Log entry {self.log_entry_id} not found in database!")
+                    logger.error(f"   Query returned None - entry may have been deleted or ID is incorrect")
                     return False
+                
+                logger.info(f"✅ [DB_LOGGER] Log entry found in database")
+                # Log current state before update
+                logger.info(f"🔵 [DB_LOGGER] Current log entry state BEFORE update:")
+                logger.info(f"   Status: {log_entry.status}")
+                logger.info(f"   Vectors Added: {log_entry.vectors_added}")
+                logger.info(f"   Vectors Failed: {log_entry.vectors_failed}")
+                logger.info(f"   Error Message: {log_entry.error_message[:100] if log_entry.error_message else None}")
+                logger.info(f"   Error Code: {log_entry.error_code}")
                 
                 # Update counters - increment by default, or set absolute values if increment_counters=False
                 if increment_counters:
@@ -163,11 +215,14 @@ class VectorDbLogger:
                 # Always update status if provided
                 if status:
                     log_entry.status = status.value
-                    logger.info(f"Setting status to: {status.value}")
-                # If error_message is provided but no status, set status to FAILED
-                elif error_message and log_entry.status == OperationStatus.PENDING.value:
-                    log_entry.status = OperationStatus.FAILED.value
-                    logger.info(f"Auto-setting status to FAILED due to error message")
+                    logger.info(f"✅ Setting status to: {status.value}")
+                # If error_message is provided but no status, set status to FAILED (unless already set)
+                elif error_message:
+                    if log_entry.status == OperationStatus.PENDING.value:
+                        log_entry.status = OperationStatus.FAILED.value
+                        logger.info(f"✅ Auto-setting status to FAILED due to error message")
+                    else:
+                        logger.info(f"Status already set to {log_entry.status}, not changing to FAILED")
                 
                 # Always update error fields if provided (for failures)
                 if error_message:
@@ -183,23 +238,47 @@ class VectorDbLogger:
                 if comment:
                     log_entry.comment = comment
                 
-                db.commit()
-                db.refresh(log_entry)
+                logger.info(f"🔵 [DB_LOGGER] Prepared updates, committing transaction...")
+                logger.info(f"   New Status: {log_entry.status}")
+                logger.info(f"   New Vectors Added: {log_entry.vectors_added}")
+                logger.info(f"   New Vectors Failed: {log_entry.vectors_failed}")
                 
-                logger.info(f"✅ Updated log entry {log_entry.id} - Status: {log_entry.status}, "
-                          f"Added: {log_entry.vectors_added}, Failed: {log_entry.vectors_failed}, "
-                          f"Error: {log_entry.error_message[:100] if log_entry.error_message else 'None'}")
+                db.commit()
+                logger.info(f"✅ [DB_LOGGER] Transaction committed successfully")
+                
+                db.refresh(log_entry)
+                logger.info(f"🔵 [DB_LOGGER] Object refreshed from database")
+                
+                logger.info(f"✅ [DB_LOGGER] Updated log entry {log_entry.id}")
+                logger.info(f"   Final Status: {log_entry.status}")
+                logger.info(f"   Final Vectors Added: {log_entry.vectors_added}")
+                logger.info(f"   Final Vectors Failed: {log_entry.vectors_failed}")
+                logger.info(f"   Final Error Message: {log_entry.error_message[:200] if log_entry.error_message else 'None'}")
+                logger.info(f"   Final Error Code: {log_entry.error_code}")
                 
                 # Update cached log entry
                 self._log_entry = log_entry
                 return True
             except Exception as e:
-                db.rollback()
+                logger.error(f"❌ [DB_LOGGER] Exception during update transaction: {e}", exc_info=True)
+                logger.error(f"   Exception type: {type(e).__name__}")
+                logger.error(f"   Exception args: {e.args}")
+                try:
+                    db.rollback()
+                    logger.info(f"🔵 [DB_LOGGER] Transaction rolled back")
+                except Exception as rollback_error:
+                    logger.error(f"❌ [DB_LOGGER] Failed to rollback: {rollback_error}")
                 raise
             finally:
-                db.close()
+                try:
+                    db.close()
+                    logger.info(f"🔵 [DB_LOGGER] Database session closed")
+                except Exception as close_error:
+                    logger.warning(f"⚠️ [DB_LOGGER] Error closing session: {close_error}")
         except Exception as e:
-            logger.error(f"Failed to update log entry {self.log_entry_id}: {e}", exc_info=True)
+            logger.error(f"❌ [DB_LOGGER] Failed to update log entry {self.log_entry_id}: {e}", exc_info=True)
+            logger.error(f"   Exception type: {type(e).__name__}")
+            logger.error(f"   Exception args: {e.args}")
             return False
     
     def log_error_safe(
@@ -224,41 +303,88 @@ class VectorDbLogger:
         Returns:
             True if logging was successful
         """
+        logger.info(f"🟡 [DB_LOGGER] log_error_safe() called")
+        logger.info(f"   log_entry_id: {self.log_entry_id}")
+        logger.info(f"   error_message: {error_message[:200]}")
+        logger.info(f"   error_code: {error_code}")
+        logger.info(f"   vectors_added: {vectors_added}, vectors_failed: {vectors_failed}")
+        
         try:
             # If we have a log entry ID, update it
             if self.log_entry_id:
-                return self.log_failure(
+                logger.info(f"🟡 [DB_LOGGER] log_entry_id exists ({self.log_entry_id}), calling log_failure()...")
+                result = self.log_failure(
                     error_message=error_message,
                     error_code=error_code,
                     vectors_added=vectors_added,
                     vectors_failed=vectors_failed
                 )
+                logger.info(f"🟡 [DB_LOGGER] log_failure() returned: {result}")
+                return result
             else:
                 # Try to create a new log entry for this error
-                logger.warning(f"Attempting to create log entry for error: {error_message[:100]}")
+                logger.warning(f"⚠️  [DB_LOGGER] No existing log entry found (log_entry_id is None)")
+                logger.warning(f"   Attempting to create log entry for error: {error_message[:100]}")
+                logger.info(f"   Stored context - index: {self._index_name}, namespace: {self._namespace}, filenames: {self._filenames}")
+                
                 try:
                     from db.enums import OperationType
+                    # Use stored context if available, otherwise use defaults
+                    index_name = self._index_name or "unknown"
+                    namespace = self._namespace
+                    filenames = self._filenames
+                    
+                    logger.info(f"🟡 [DB_LOGGER] Creating error log entry with context:")
+                    logger.info(f"   index: {index_name}, namespace: {namespace}, filenames: {filenames}")
+                    
+                    logger.info(f"🟡 [DB_LOGGER] Calling create_log_entry() with FAILED status...")
                     log_entry = self.create_log_entry(
                         operation_type=OperationType.INGEST,
-                        index_name="unknown",  # We don't know the index at this point
-                        namespace=None,
-                        filenames=None,
+                        index_name=index_name,
+                        namespace=namespace,
+                        filenames=filenames,
                         comment=comment or f"Error logged: {error_message[:200]}",
-                        status=OperationStatus.FAILED
+                        status=OperationStatus.FAILED  # Create with FAILED status directly
                     )
-                    if log_entry:
-                        return self.update_log_entry(
+                    
+                    logger.info(f"🟡 [DB_LOGGER] create_log_entry() returned: {log_entry}")
+                    logger.info(f"   self.log_entry_id after create: {self.log_entry_id}")
+                    
+                    if log_entry and self.log_entry_id:
+                        logger.info(f"✅ [DB_LOGGER] Created error log entry {self.log_entry_id}")
+                        logger.info(f"   Entry status: {log_entry.status}")
+                        logger.info(f"   Now updating with error details...")
+                        
+                        # Update with error details and vector counts
+                        result = self.update_log_entry(
                             vectors_added=vectors_added,
                             vectors_failed=vectors_failed,
-                            status=OperationStatus.FAILED,
+                            status=OperationStatus.FAILED,  # Ensure status is FAILED
                             error_message=error_message,
-                            error_code=error_code
+                            error_code=error_code,
+                            increment_counters=False
                         )
+                        logger.info(f"🟡 [DB_LOGGER] update_log_entry() returned: {result}")
+                        
+                        if result:
+                            logger.info(f"✅ [DB_LOGGER] Error log entry successfully created and updated")
+                        else:
+                            logger.error(f"❌ [DB_LOGGER] Error log entry created but update failed!")
+                        
+                        return result
+                    else:
+                        logger.error(f"❌ [DB_LOGGER] Failed to create error log entry or log_entry_id not set")
+                        logger.error(f"   log_entry: {log_entry}")
+                        logger.error(f"   log_entry_id: {self.log_entry_id}")
+                        logger.error(f"   This means create_log_entry() failed silently")
+                        return False
                 except Exception as create_error:
-                    logger.error(f"Failed to create log entry for error: {create_error}", exc_info=True)
-                return False
+                    logger.error(f"❌ [DB_LOGGER] Exception creating log entry for error: {create_error}", exc_info=True)
+                    logger.error(f"   Exception type: {type(create_error).__name__}")
+                    return False
         except Exception as e:
-            logger.error(f"Failed to log error safely: {e}", exc_info=True)
+            logger.error(f"❌ [DB_LOGGER] Exception in log_error_safe(): {e}", exc_info=True)
+            logger.error(f"   Exception type: {type(e).__name__}")
             return False
     
     def log_success(
@@ -312,7 +438,17 @@ class VectorDbLogger:
         Returns:
             True if logging was successful
         """
-        logger.info(f"Logging failure: {error_message[:100]}, code: {error_code}, added: {vectors_added}, failed: {vectors_failed}")
+        logger.info(f"🔴 [DB_LOGGER] log_failure() called")
+        logger.info(f"   log_entry_id: {self.log_entry_id}")
+        logger.info(f"   error_message: {error_message[:200]}")
+        logger.info(f"   error_code: {error_code}")
+        logger.info(f"   vectors_added: {vectors_added}, vectors_failed: {vectors_failed}")
+        
+        if not self.log_entry_id:
+            logger.error(f"❌ [DB_LOGGER] log_failure() called but log_entry_id is None!")
+            logger.error(f"   Cannot update non-existent log entry")
+            return False
+        
         result = self.update_log_entry(
             vectors_added=vectors_added,
             vectors_failed=vectors_failed,
@@ -322,8 +458,10 @@ class VectorDbLogger:
             increment_counters=False  # Set absolute values for final status
         )
         if result:
-            logger.info(f"✅ Failure status updated in database")
+            logger.info(f"✅ [DB_LOGGER] Failure status updated in database successfully")
         else:
-            logger.error(f"❌ Failed to update failure status in database - log_entry_id: {self.log_entry_id}")
+            logger.error(f"❌ [DB_LOGGER] Failed to update failure status in database!")
+            logger.error(f"   log_entry_id: {self.log_entry_id}")
+            logger.error(f"   update_log_entry() returned False")
         return result
 
