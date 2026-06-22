@@ -52,7 +52,11 @@ class VectorDbIngestionLog(Base):
     # File Information
     filenames = Column(JSON, nullable=True)  # Array of filenames
     comment = Column(Text, nullable=True)
-    
+
+    # Pointer back to the original source document in Google Cloud Storage.
+    gcs_bucket = Column(String, nullable=True)
+    gcs_file_path = Column(String, nullable=True)
+
     # Vector Counts
     vectors_added = Column(Integer, default=0)
     vectors_deleted = Column(Integer, default=0)

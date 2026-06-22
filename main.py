@@ -8,6 +8,7 @@ from helpers.csv_processor import process_csv_file
 from helpers.pinecone import upsert_vectors, ProcessingResult
 from helpers.get_secret import get_secret
 from helpers.db_logger import VectorDbLogger
+from clients.gcs_client_factory import cloud_storage_client_for_account
 from db.enums import OperationType, OperationStatus
 from singletons.environment_variables import EnvironmentVariables
 
@@ -156,12 +157,21 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         # Check if JWT is provided
         if not jwt:
             raise ValueError("JWT token is required for embedding API calls")
-        
+
+        # Resolve the account's own GCS credentials to download from its bucket.
+        account_id_for_gcs = parsed_message.get('account_id')
+        if account_id_for_gcs is None and user_id:
+            try:
+                account_id_for_gcs = int(user_id)
+            except (TypeError, ValueError):
+                account_id_for_gcs = None
+        account_storage_client = cloud_storage_client_for_account(account_id_for_gcs)
+
         # Step 1: Download file from GCS
         logger.info(f"Step 1: Downloading file from GCS: gs://{gcs_bucket}/{gcs_file_path}")
         try:
             # Check if file exists first
-            file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path)
+            file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path, account_storage_client)
             if not file_exists:
                 error_msg = f"File does not exist in GCS: gs://{gcs_bucket}/{gcs_file_path}"
                 logger.error(f"❌ {error_msg}")
@@ -177,7 +187,7 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                         logger.warning(f"Failed to log GCS error to database: {log_error}")
                 raise FileNotFoundError(error_msg)
             
-            csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path)
+            csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path, account_storage_client)
             
             if not csv_content.strip():
                 error_msg = "CSV file is empty"
@@ -238,7 +248,9 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                     namespace=namespace,
                     filenames=[filename],
                     comment=f"Processing CSV file: {filename}",
-                    status=OperationStatus.PENDING
+                    status=OperationStatus.PENDING,
+                    gcs_bucket=gcs_bucket,
+                    gcs_file_path=gcs_file_path
                 )
                 
                 logger.info(f"🔵 [MAIN] create_log_entry() returned: {log_entry}")
@@ -282,7 +294,9 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                 user_id,
                 user_email,
                 jwt,
-                db_logger  # Pass db_logger for error tracking
+                db_logger,  # Pass db_logger for error tracking
+                gcs_bucket=gcs_bucket,
+                gcs_file_path=gcs_file_path
             )
         except Exception as csv_error:
             # Log CSV processing error to database

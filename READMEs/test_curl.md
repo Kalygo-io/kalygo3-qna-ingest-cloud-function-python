@@ -9,5 +9,3 @@ curl -X POST http://localhost:8080/ \
 ```
 
 ##
-
-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0YWRAY21kbGFicy5pbyIsImlkIjoxLCJleHAiOjE3NjU4NjczODd9.1fhUCaVJdCtOUI6U2dEOVK5tA-8N77VUk1EOFeBs8oc

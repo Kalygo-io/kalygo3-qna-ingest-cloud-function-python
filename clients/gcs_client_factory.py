@@ -10,6 +10,63 @@ from singletons.environment_variables import EnvironmentVariables
 logger = logging.getLogger(__name__)
 
 
+class AccountGcsCredentialMissing(Exception):
+    """Raised when an account has no usable GOOGLE_CLOUD_STORAGE credential."""
+    pass
+
+
+def cloud_storage_client_for_account(account_id: int) -> storage.Client:
+    """
+    Build a Storage client from the account's own GCS service-account credential.
+
+    Reads the GOOGLE_CLOUD_STORAGE credential row for the account from the DB and
+    decrypts it in-memory (the service-account JSON is never logged). Raises
+    AccountGcsCredentialMissing if the account has not configured GCS creds.
+    """
+    # Imported lazily so the module loads even if DB deps are unavailable.
+    from db.database import init_database, get_db
+    from db.credential_model import Credential
+    from db.enums import CredentialType
+    from helpers.credential_crypto import decrypt_credential_data
+
+    if not account_id:
+        raise AccountGcsCredentialMissing("Missing account_id; cannot resolve GCS credentials")
+
+    init_database()
+    db_gen = get_db()
+    db = next(db_gen)
+    try:
+        credential = (
+            db.query(Credential)
+            .filter(
+                Credential.account_id == account_id,
+                Credential.credential_type == CredentialType.GOOGLE_CLOUD_STORAGE,
+            )
+            .order_by(Credential.updated_at.desc())
+            .first()
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    if not credential:
+        raise AccountGcsCredentialMissing(
+            f"Account {account_id} has no GOOGLE_CLOUD_STORAGE credential configured"
+        )
+
+    data = decrypt_credential_data(credential.encrypted_data)
+    service_account_json = data.get("service_account_json")
+    if not service_account_json:
+        raise AccountGcsCredentialMissing(
+            f"Account {account_id} GCS credential is missing service_account_json"
+        )
+
+    logger.info("Using per-account GCS credentials for account %s", account_id)
+    return storage.Client.from_service_account_info(service_account_json)
+
+
 def cloud_storage_client_factory() -> storage.Client:
     """
     Create a Storage client with proper credentials.

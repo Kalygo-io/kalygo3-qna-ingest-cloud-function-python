@@ -88,7 +88,9 @@ def generate_embedding_for_row(
     user_id: str,
     user_email: str,
     jwt: str,
-    db_logger=None
+    db_logger=None,
+    gcs_bucket: Optional[str] = None,
+    gcs_file_path: Optional[str] = None
 ) -> Optional[VectorData]:
     """
     Generate embedding for a single row and prepare vector data.
@@ -151,6 +153,10 @@ def generate_embedding_for_row(
             'upload_timestamp': row.uploaded_at,
             'created_at': row.created_at,
             'last_edited_at': row.last_edited_at,
+            # Provider-agnostic pointer back to the original source document.
+            'storage_provider': 'gcs' if (gcs_bucket or gcs_file_path) else None,
+            'storage_bucket': gcs_bucket,
+            'storage_path': gcs_file_path,
         }
         
         # Filter out None values (Pinecone doesn't accept null metadata values)
@@ -192,7 +198,9 @@ def process_csv_file(
     user_id: str,
     user_email: str,
     jwt: str,
-    db_logger=None
+    db_logger=None,
+    gcs_bucket: Optional[str] = None,
+    gcs_file_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Process CSV file and generate embeddings for all rows.
@@ -233,7 +241,9 @@ def process_csv_file(
                 user_id,
                 user_email,
                 jwt,
-                db_logger
+                db_logger,
+                gcs_bucket=gcs_bucket,
+                gcs_file_path=gcs_file_path
             )
             
             if vector_data:

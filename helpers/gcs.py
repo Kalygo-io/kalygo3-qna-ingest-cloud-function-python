@@ -7,19 +7,21 @@ from clients.gcs_client_factory import cloud_storage_client_factory
 logger = logging.getLogger(__name__)
 
 
-def download_file_from_gcs(bucket_name: str, file_path: str) -> str:
+def download_file_from_gcs(bucket_name: str, file_path: str, storage_client=None) -> str:
     """
     Download file from Google Cloud Storage.
-    
+
     Args:
         bucket_name: Name of the GCS bucket
         file_path: Path to the file in the bucket
-        
+        storage_client: Optional pre-built client (e.g. per-account credentials).
+            Falls back to the platform client factory when not provided.
+
     Returns:
         File content as string (UTF-8)
     """
     try:
-        storage_client = cloud_storage_client_factory()
+        storage_client = storage_client or cloud_storage_client_factory()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
         
@@ -39,19 +41,20 @@ def download_file_from_gcs(bucket_name: str, file_path: str) -> str:
         raise Exception(f"Failed to download file from GCS: {str(error)}")
 
 
-def file_exists_in_gcs(bucket_name: str, file_path: str) -> bool:
+def file_exists_in_gcs(bucket_name: str, file_path: str, storage_client=None) -> bool:
     """
     Validate that a file exists in GCS.
-    
+
     Args:
         bucket_name: Name of the GCS bucket
         file_path: Path to the file in the bucket
-        
+        storage_client: Optional pre-built client (e.g. per-account credentials).
+
     Returns:
         True if file exists, False otherwise
     """
     try:
-        storage_client = cloud_storage_client_factory()
+        storage_client = storage_client or cloud_storage_client_factory()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
         

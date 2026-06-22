@@ -43,7 +43,9 @@ class VectorDbLogger:
         namespace: Optional[str] = None,
         filenames: Optional[List[str]] = None,
         comment: Optional[str] = None,
-        status: OperationStatus = OperationStatus.PENDING
+        status: OperationStatus = OperationStatus.PENDING,
+        gcs_bucket: Optional[str] = None,
+        gcs_file_path: Optional[str] = None
     ) -> Optional[VectorDbIngestionLog]:
         """
         Create a new log entry in the database.
@@ -83,6 +85,8 @@ class VectorDbLogger:
                     namespace=namespace,
                     filenames=filenames,
                     comment=comment,
+                    gcs_bucket=gcs_bucket,
+                    gcs_file_path=gcs_file_path,
                     batch_number=self.batch_number
                 )
                 
