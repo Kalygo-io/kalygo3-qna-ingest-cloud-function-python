@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Any, Union
 
 from helpers.gcs import download_file_from_gcs, file_exists_in_gcs
-from helpers.csv_processor import process_csv_file
+from helpers.csv_processor import process_csv_file, process_qna_pairs
 from helpers.pinecone import upsert_vectors, ProcessingResult
 from helpers.get_secret import get_secret
 from helpers.db_logger import VectorDbLogger
@@ -145,13 +145,19 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         upload_timestamp = parsed_message.get('upload_timestamp')
         processing_status = parsed_message.get('processing_status')
         jwt = parsed_message.get('jwt')
-        
+
+        # PDF-to-FAQ flow: the reviewed Q&A pairs ride in the message and the
+        # GCS file is the ORIGINAL PDF (the referenced source, not parsed here).
+        source_type = parsed_message.get('source_type')
+        qna_pairs = parsed_message.get('qna_pairs')
+        is_pdf_faq = source_type == 'pdf_faq' and bool(qna_pairs)
+
         # Validate required fields
         if not filename or not gcs_bucket or not gcs_file_path:
             raise ValueError("Missing required fields: filename, gcs_bucket, or gcs_file_path")
-        
-        # Validate file type (only CSV files are supported)
-        if not filename.lower().endswith('.csv'):
+
+        # Validate file type (CSV path only; the PDF-to-FAQ path stores a PDF)
+        if not is_pdf_faq and not filename.lower().endswith('.csv'):
             raise ValueError("Only CSV files are supported")
         
         # Check if JWT is provided
@@ -165,61 +171,69 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                 account_id_for_gcs = int(user_id)
             except (TypeError, ValueError):
                 account_id_for_gcs = None
-        account_storage_client = cloud_storage_client_for_account(account_id_for_gcs)
+        # Step 1: Obtain the Q&A content.
+        # - CSV flow: download and parse the CSV from GCS.
+        # - PDF-to-FAQ flow: the pairs are already in the message; the GCS file
+        #   is the original PDF (the referenced source), so nothing to download.
+        csv_content = None
+        if is_pdf_faq:
+            logger.info(f"Step 1: PDF-to-FAQ flow — using {len(qna_pairs)} Q&A pair(s) from message; "
+                        f"original PDF referenced at gs://{gcs_bucket}/{gcs_file_path}")
+        else:
+            account_storage_client = cloud_storage_client_for_account(account_id_for_gcs)
 
-        # Step 1: Download file from GCS
-        logger.info(f"Step 1: Downloading file from GCS: gs://{gcs_bucket}/{gcs_file_path}")
-        try:
-            # Check if file exists first
-            file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path, account_storage_client)
-            if not file_exists:
-                error_msg = f"File does not exist in GCS: gs://{gcs_bucket}/{gcs_file_path}"
-                logger.error(f"❌ {error_msg}")
+            logger.info(f"Step 1: Downloading file from GCS: gs://{gcs_bucket}/{gcs_file_path}")
+            try:
+                # Check if file exists first
+                file_exists = file_exists_in_gcs(gcs_bucket, gcs_file_path, account_storage_client)
+                if not file_exists:
+                    error_msg = f"File does not exist in GCS: gs://{gcs_bucket}/{gcs_file_path}"
+                    logger.error(f"❌ {error_msg}")
+                    if db_logger:
+                        try:
+                            db_logger.log_failure(
+                                error_message=error_msg,
+                                error_code="FileNotFoundError",
+                                vectors_added=0,
+                                vectors_failed=0
+                            )
+                        except Exception as log_error:
+                            logger.warning(f"Failed to log GCS error to database: {log_error}")
+                    raise FileNotFoundError(error_msg)
+
+                csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path, account_storage_client)
+
+                if not csv_content.strip():
+                    error_msg = "CSV file is empty"
+                    logger.error(f"❌ {error_msg}")
+                    if db_logger:
+                        try:
+                            db_logger.log_failure(
+                                error_message=error_msg,
+                                error_code="ValueError",
+                                vectors_added=0,
+                                vectors_failed=0
+                            )
+                        except Exception as log_error:
+                            logger.warning(f"Failed to log empty file error to database: {log_error}")
+                    raise ValueError(error_msg)
+            except (FileNotFoundError, ValueError) as gcs_error:
+                # Re-raise validation errors
+                raise
+            except Exception as gcs_error:
+                error_msg = f"Failed to download file from GCS: {str(gcs_error)}"
+                logger.error(f"❌ {error_msg}", exc_info=True)
                 if db_logger:
                     try:
                         db_logger.log_failure(
                             error_message=error_msg,
-                            error_code="FileNotFoundError",
+                            error_code=type(gcs_error).__name__,
                             vectors_added=0,
                             vectors_failed=0
                         )
                     except Exception as log_error:
-                        logger.warning(f"Failed to log GCS error to database: {log_error}")
-                raise FileNotFoundError(error_msg)
-            
-            csv_content = download_file_from_gcs(gcs_bucket, gcs_file_path, account_storage_client)
-            
-            if not csv_content.strip():
-                error_msg = "CSV file is empty"
-                logger.error(f"❌ {error_msg}")
-                if db_logger:
-                    try:
-                        db_logger.log_failure(
-                            error_message=error_msg,
-                            error_code="ValueError",
-                            vectors_added=0,
-                            vectors_failed=0
-                        )
-                    except Exception as log_error:
-                        logger.warning(f"Failed to log empty file error to database: {log_error}")
-                raise ValueError(error_msg)
-        except (FileNotFoundError, ValueError) as gcs_error:
-            # Re-raise validation errors
-            raise
-        except Exception as gcs_error:
-            error_msg = f"Failed to download file from GCS: {str(gcs_error)}"
-            logger.error(f"❌ {error_msg}", exc_info=True)
-            if db_logger:
-                try:
-                    db_logger.log_failure(
-                        error_message=error_msg,
-                        error_code=type(gcs_error).__name__,
-                        vectors_added=0,
-                        vectors_failed=0
-                    )
-                except Exception as log_error:
-                    logger.warning(f"Failed to log GCS download error to database: {log_error}")
-            raise Exception(error_msg) from gcs_error
+                        logger.warning(f"Failed to log GCS download error to database: {log_error}")
+                raise Exception(error_msg) from gcs_error
         
         # Initialize database logger for tracking ingestion
         logger.info(f"Initializing database logger - user_id: {user_id}, user_email: {user_email}")
@@ -285,19 +299,31 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
             except Exception:
                 db_logger = None
         
-        # Step 2: Parse CSV and generate embeddings
-        logger.info(f"Step 2: Processing CSV file: {filename}")
+        # Step 2: Build vectors (parse CSV, or use Q&A pairs from the message)
+        logger.info(f"Step 2: Processing source: {filename}")
         try:
-            result_data = process_csv_file(
-                csv_content,
-                filename,
-                user_id,
-                user_email,
-                jwt,
-                db_logger,  # Pass db_logger for error tracking
-                gcs_bucket=gcs_bucket,
-                gcs_file_path=gcs_file_path
-            )
+            if is_pdf_faq:
+                result_data = process_qna_pairs(
+                    qna_pairs,
+                    filename,
+                    user_id,
+                    user_email,
+                    jwt,
+                    db_logger,  # Pass db_logger for error tracking
+                    gcs_bucket=gcs_bucket,
+                    gcs_file_path=gcs_file_path
+                )
+            else:
+                result_data = process_csv_file(
+                    csv_content,
+                    filename,
+                    user_id,
+                    user_email,
+                    jwt,
+                    db_logger,  # Pass db_logger for error tracking
+                    gcs_bucket=gcs_bucket,
+                    gcs_file_path=gcs_file_path
+                )
         except Exception as csv_error:
             # Log CSV processing error to database
             if db_logger:

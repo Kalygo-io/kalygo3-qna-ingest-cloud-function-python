@@ -192,6 +192,100 @@ def generate_embedding_for_row(
         return None
 
 
+def process_qna_pairs(
+    qna_pairs: List[Dict[str, Any]],
+    filename: str,
+    user_id: str,
+    user_email: str,
+    jwt: str,
+    db_logger=None,
+    gcs_bucket: Optional[str] = None,
+    gcs_file_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generate embeddings for pre-reviewed Q&A pairs delivered in the Pub/Sub
+    message (the PDF-to-FAQ flow).
+
+    Mirrors process_csv_file but skips CSV parsing — the pairs are already
+    structured. `filename`/`gcs_bucket`/`gcs_file_path` point at the ORIGINAL
+    PDF stored in GCS, so each vector's source metadata references the PDF.
+
+    Returns:
+        Dictionary with 'vectors', 'successful_rows', and 'failed_rows'
+    """
+    try:
+        uploaded_at = str(int(__import__('time').time() * 1000))
+        rows: List[ProcessedRow] = []
+        for index, pair in enumerate(qna_pairs, start=1):
+            question = str(pair.get('q', '')).strip() if pair.get('q') else ''
+            answer = str(pair.get('a', '')).strip() if pair.get('a') else ''
+            if question and answer:
+                rows.append(ProcessedRow(
+                    question=question,
+                    answer=answer,
+                    content=f"Q: {question}\nA: {answer}",
+                    row_number=index,
+                    created_at='',
+                    last_edited_at='',
+                    uploaded_at=uploaded_at
+                ))
+            else:
+                logger.info(f'Skipping Q&A pair {index}: empty question or answer')
+
+        if len(rows) == 0:
+            raise ValueError("No valid Q&A pairs found in message")
+
+        logger.info(f'Processing {len(rows)} Q&A pairs from source: {filename}')
+
+        vectors: List[VectorData] = []
+        successful_rows = 0
+        failed_rows = 0
+
+        for row in rows:
+            vector_data = generate_embedding_for_row(
+                row,
+                filename,
+                user_id,
+                user_email,
+                jwt,
+                db_logger,
+                gcs_bucket=gcs_bucket,
+                gcs_file_path=gcs_file_path
+            )
+
+            if vector_data:
+                vectors.append(vector_data)
+                successful_rows += 1
+            else:
+                failed_rows += 1
+
+        logger.info(
+            f'Successfully processed {successful_rows} pairs, failed {failed_rows} pairs'
+        )
+
+        return {
+            'vectors': vectors,
+            'successful_rows': successful_rows,
+            'failed_rows': failed_rows,
+        }
+    except Exception as error:
+        error_msg = f'Error processing Q&A pairs: {str(error)}'
+        logger.error(f'❌ {error_msg}', exc_info=True)
+
+        if db_logger:
+            try:
+                db_logger.log_failure(
+                    error_message=error_msg,
+                    error_code=type(error).__name__,
+                    vectors_added=0,
+                    vectors_failed=0
+                )
+            except Exception as log_error:
+                logger.warning(f'Failed to log Q&A processing error to database: {log_error}')
+
+        raise Exception(error_msg) from error
+
+
 def process_csv_file(
     csv_content: str,
     filename: str,
