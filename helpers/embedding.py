@@ -2,6 +2,7 @@
 Embedding helper functions
 """
 import logging
+import time
 import requests
 from singletons.environment_variables import EnvironmentVariables
 
@@ -27,7 +28,9 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
         print('--- --- --- --- ---')
 
         embeddings_api_url = f'{EnvironmentVariables.EMBEDDINGS_API_URL}/huggingface/embedding'
-        
+
+        logger.info(f'Embedding API POST {embeddings_api_url} (text length={len(text)})')
+        request_start = time.monotonic()
         response = requests.post(
             embeddings_api_url,
             json={'input': text},
@@ -37,7 +40,11 @@ def fetch_embedding(jwt: str, text: str) -> list[float]:
             },
             timeout=120  # 120 second timeout
         )
-        
+        request_elapsed = time.monotonic() - request_start
+        logger.info(
+            f'Embedding API responded {response.status_code} in {request_elapsed:.2f}s'
+        )
+
         # Check for HTTP errors and provide detailed error messages
         if response.status_code == 401:
             error_detail = "Unauthorized - Invalid or expired JWT token"

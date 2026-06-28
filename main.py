@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import sys
+import time
 from typing import Dict, Any, Union
 
 from helpers.gcs import download_file_from_gcs, file_exists_in_gcs
@@ -12,7 +14,19 @@ from clients.gcs_client_factory import cloud_storage_client_for_account
 from db.enums import OperationType, OperationStatus
 from singletons.environment_variables import EnvironmentVariables
 
-logging.basicConfig(level=logging.INFO)
+# IMPORTANT: In the Cloud Functions gen2 (Cloud Run) runtime, a root log handler
+# is already installed before this module imports, so a plain basicConfig() call
+# is a no-op and the root logger stays at WARNING. That silently drops every
+# logger.info(...) in this function and its helpers — which is why upsert/ingest
+# progress never showed up in Cloud Logging. force=True tears down the existing
+# handlers and reconfigures at INFO so our diagnostics are actually emitted.
+logging.basicConfig(
+    level=logging.INFO,
+    force=True,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream=sys.stdout,
+)
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -28,13 +42,16 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
     Returns:
         ProcessingResult dictionary (Pub/Sub) or Flask response tuple (HTTP)
     """
+    run_start = time.monotonic()
     message = "{}"
     attributes: Dict[str, str] = {}
     is_http_trigger = False
     db_logger = None  # Initialize for exception handler
     failed_rows_count = 0  # Track failed rows for exception handler
     successful_rows_count = 0  # Track successful rows for exception handler
-    
+
+    logger.info("===== QnA ingest function INVOKED =====")
+
     try:
         # Load secrets (with error handling in case Secret Manager is not accessible during import)
         try:
@@ -341,17 +358,33 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         vectors = result_data['vectors']
         successful_rows = result_data['successful_rows']
         failed_rows = result_data['failed_rows']
-        
+
         # Store for exception handler
         successful_rows_count = successful_rows
         failed_rows_count = failed_rows
-        
+
+        logger.info(
+            f"===== Step 2 complete: {successful_rows} embedding(s) built, "
+            f"{failed_rows} failed; {len(vectors)} vector(s) ready to ingest ====="
+        )
+
         # Step 3: Insert embeddings into Pinecone
-        logger.info(f"Step 3: Inserting {len(vectors)} vectors into Pinecone")
+        logger.info(
+            f"===== Step 3: INGEST START — upserting {len(vectors)} vector(s) "
+            f"into index '{EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}', "
+            f"namespace '{namespace}' ====="
+        )
         if len(vectors) > 0:
             try:
+                upsert_start = time.monotonic()
                 upsert_vectors(vectors, namespace)
-                
+                upsert_elapsed = time.monotonic() - upsert_start
+                logger.info(
+                    f"===== Step 3: INGEST COMPLETE — {len(vectors)} vector(s) upserted "
+                    f"to '{EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}'/"
+                    f"'{namespace}' in {upsert_elapsed:.2f}s ====="
+                )
+
                 # Log success to database
                 if db_logger:
                     try:
@@ -423,8 +456,11 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
             'file_size_bytes': file_size
         }
         
-        logger.info(f"Processing completed successfully: {result}")
-        
+        logger.info(
+            f"===== DONE in {time.monotonic() - run_start:.2f}s — "
+            f"completed successfully: {result} ====="
+        )
+
         # Return appropriate response based on trigger type
         if is_http_trigger:
             from flask import jsonify
@@ -435,7 +471,11 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
     except Exception as error:
         error_msg = str(error)
         error_code = type(error).__name__
-        logger.error(f"❌ Error processing message: {error_msg}", exc_info=True)
+        logger.error(
+            f"❌ FAILED after {time.monotonic() - run_start:.2f}s — "
+            f"{error_code}: {error_msg}",
+            exc_info=True,
+        )
         
         # Log failure to database - catch-all error handler
         try:

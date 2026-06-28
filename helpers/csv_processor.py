@@ -241,7 +241,12 @@ def process_qna_pairs(
         successful_rows = 0
         failed_rows = 0
 
+        total_rows = len(rows)
         for row in rows:
+            logger.info(
+                f'[pair {row.row_number}/{total_rows}] processing: {row.question[:40]!r}'
+            )
+
             vector_data = generate_embedding_for_row(
                 row,
                 filename,
@@ -259,8 +264,14 @@ def process_qna_pairs(
             else:
                 failed_rows += 1
 
+            logger.info(
+                f'[pair {row.row_number}/{total_rows}] done '
+                f'(running totals: {successful_rows} ok, {failed_rows} failed)'
+            )
+
         logger.info(
-            f'Successfully processed {successful_rows} pairs, failed {failed_rows} pairs'
+            f'Embedding loop finished: {successful_rows} ok, {failed_rows} failed '
+            f'out of {total_rows} pair(s)'
         )
 
         return {
@@ -324,11 +335,12 @@ def process_csv_file(
         successful_rows = 0
         failed_rows = 0
         
+        total_rows = len(rows)
         for row in rows:
             logger.info(
-                f'Processing row {row.row_number}: {row.question[:10]}'
+                f'[row {row.row_number}/{total_rows}] processing: {row.question[:40]!r}'
             )
-            
+
             vector_data = generate_embedding_for_row(
                 row,
                 filename,
@@ -339,15 +351,21 @@ def process_csv_file(
                 gcs_bucket=gcs_bucket,
                 gcs_file_path=gcs_file_path
             )
-            
+
             if vector_data:
                 vectors.append(vector_data)
                 successful_rows += 1
             else:
                 failed_rows += 1
-        
+
+            logger.info(
+                f'[row {row.row_number}/{total_rows}] done '
+                f'(running totals: {successful_rows} ok, {failed_rows} failed)'
+            )
+
         logger.info(
-            f'Successfully processed {successful_rows} rows, failed {failed_rows} rows'
+            f'Embedding loop finished: {successful_rows} ok, {failed_rows} failed '
+            f'out of {total_rows} row(s)'
         )
         
         return {
