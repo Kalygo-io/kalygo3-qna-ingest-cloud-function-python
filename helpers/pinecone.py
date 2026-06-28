@@ -14,21 +14,76 @@ VectorData = Dict[str, Any]  # {'id': str, 'values': List[float], 'metadata': Di
 ProcessingResult = Dict[str, Any]
 
 
-def initialize_pinecone() -> Pinecone:
+def pinecone_api_key_for_account(account_id: int) -> str:
+    """
+    Resolve an account's own Pinecone API key from the credentials table.
+
+    Reads the PINECONE_API_KEY credential row for the account and decrypts it
+    in-memory (the key is never logged). This makes ingestion use the SAME
+    per-account Pinecone project the API microservice reads/manages with, so the
+    chosen index actually receives the data. Raises ValueError if the account has
+    no Pinecone credential configured.
+    """
+    # Imported lazily so the module loads even if DB deps are unavailable
+    # (mirrors clients/gcs_client_factory.py).
+    from db.database import init_database, get_db
+    from db.credential_model import Credential
+    from db.enums import CredentialType
+    from helpers.credential_crypto import decrypt_credential_data
+
+    if not account_id:
+        raise ValueError("Missing account_id; cannot resolve Pinecone credentials")
+
+    init_database()
+    db_gen = get_db()
+    db = next(db_gen)
+    try:
+        credential = (
+            db.query(Credential)
+            .filter(
+                Credential.account_id == account_id,
+                Credential.credential_type == CredentialType.PINECONE_API_KEY,
+            )
+            .order_by(Credential.updated_at.desc())
+            .first()
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    if not credential:
+        raise ValueError(f"Account {account_id} has no PINECONE_API_KEY credential configured")
+
+    data = decrypt_credential_data(credential.encrypted_data)
+    api_key = data.get("api_key")
+    if not api_key:
+        raise ValueError(f"Account {account_id} Pinecone credential is missing api_key")
+
+    logger.info("Using per-account Pinecone credentials for account %s", account_id)
+    return api_key
+
+
+def initialize_pinecone(api_key: str = None) -> Pinecone:
     """
     Initialize Pinecone client.
-    
+
+    Args:
+        api_key: Account's Pinecone API key. When omitted, falls back to the
+            globally configured PINECONE_API_KEY (legacy/default).
+
     Returns:
         Pinecone client instance
     """
-    api_key = EnvironmentVariables.PINECONE_API_KEY
-    
+    api_key = api_key or EnvironmentVariables.PINECONE_API_KEY
+
     if not api_key:
-        raise ValueError('PINECONE_API_KEY environment variable is required')
-    
-    logger.info('Initializing Pinecone client with:')
-    logger.info(f'- API Key: {api_key[:8]}...')
-    
+        raise ValueError('A Pinecone API key is required')
+
+    # Never log the key (or any prefix of it).
+    logger.info('Initializing Pinecone client')
+
     try:
         pinecone = Pinecone(api_key=api_key)
         logger.info('Pinecone client initialized successfully')
@@ -38,17 +93,18 @@ def initialize_pinecone() -> Pinecone:
         raise
 
 
-def get_pinecone_index(index_name: str = None):
+def get_pinecone_index(index_name: str = None, api_key: str = None):
     """
     Get Pinecone index.
-    
+
     Args:
         index_name: Optional index name. If not provided, uses environment variable.
-        
+        api_key: Optional account Pinecone API key (see initialize_pinecone).
+
     Returns:
         Pinecone index instance
     """
-    pinecone = initialize_pinecone()
+    pinecone = initialize_pinecone(api_key)
     index_name = index_name or EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX
     
     if not index_name:
@@ -65,16 +121,16 @@ def get_pinecone_index(index_name: str = None):
         raise
 
 
-def test_pinecone_connection() -> bool:
+def test_pinecone_connection(api_key: str = None) -> bool:
     """
     Test Pinecone connection.
-    
+
     Returns:
         True if connection is successful, False otherwise
     """
     try:
         logger.info('Testing Pinecone connection...')
-        pinecone = initialize_pinecone()
+        pinecone = initialize_pinecone(api_key)
         
         # Try to list indexes to test connection
         indexes = pinecone.list_indexes()
@@ -88,23 +144,29 @@ def test_pinecone_connection() -> bool:
 
 def upsert_vectors(
     vectors: List[VectorData],
-    namespace: str = 'similarity_search'
+    namespace: str = 'similarity_search',
+    index_name: str = None,
+    api_key: str = None
 ) -> None:
     """
     Upsert vectors to Pinecone in batches.
-    
+
     Args:
         vectors: List of vector data dictionaries
         namespace: Namespace to upsert vectors to (default: 'similarity_search')
+        index_name: Target Pinecone index. When omitted, falls back to the
+            configured default index (PINECONE_ALL_MINILM_L6_V2_INDEX).
+        api_key: Account's Pinecone API key (see initialize_pinecone). When
+            omitted, falls back to the globally configured key.
     """
-    logger.info(f'Starting upsert of {len(vectors)} vectors to namespace: {namespace}')
-    
+    logger.info(f'Starting upsert of {len(vectors)} vectors to index: {index_name or "<default>"}, namespace: {namespace}')
+
     # Test connection first
-    connection_ok = test_pinecone_connection()
+    connection_ok = test_pinecone_connection(api_key)
     if not connection_ok:
         raise Exception('Pinecone connection test failed')
-    
-    index = get_pinecone_index()
+
+    index = get_pinecone_index(index_name, api_key)
     
     try:
         logger.info('📊 Vectors to be inserted:')

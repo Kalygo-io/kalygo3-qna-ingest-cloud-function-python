@@ -7,7 +7,7 @@ from typing import Dict, Any, Union
 
 from helpers.gcs import download_file_from_gcs, file_exists_in_gcs
 from helpers.csv_processor import process_csv_file, process_qna_pairs
-from helpers.pinecone import upsert_vectors, ProcessingResult
+from helpers.pinecone import upsert_vectors, pinecone_api_key_for_account, ProcessingResult
 from helpers.get_secret import get_secret
 from helpers.db_logger import VectorDbLogger
 from clients.gcs_client_factory import cloud_storage_client_for_account
@@ -159,6 +159,10 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         user_id = parsed_message.get('user_id')
         user_email = parsed_message.get('user_email')
         namespace = parsed_message.get('namespace', 'similarity_search')
+        # Target index chosen by the caller (e.g. the PDF-to-FAQ wizard). Fall
+        # back to the configured default only when the message omits it, so
+        # ingestion lands in the index the user actually selected.
+        index_name = parsed_message.get('index_name') or EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX
         upload_timestamp = parsed_message.get('upload_timestamp')
         processing_status = parsed_message.get('processing_status')
         jwt = parsed_message.get('jwt')
@@ -269,13 +273,13 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                 )
                 # Create log entry with PENDING status
                 logger.info(f"🔵 [MAIN] Creating initial log entry with PENDING status...")
-                logger.info(f"   Index: {EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}")
+                logger.info(f"   Index: {index_name}")
                 logger.info(f"   Namespace: {namespace}, Filename: {filename}")
                 logger.info(f"   Account ID: {account_id}")
-                
+
                 log_entry = db_logger.create_log_entry(
                     operation_type=OperationType.INGEST,
-                    index_name=EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX,
+                    index_name=index_name,
                     namespace=namespace,
                     filenames=[filename],
                     comment=f"Processing CSV file: {filename}",
@@ -308,14 +312,21 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
                     logger.info(f"Attempting to create db_logger after error: {account_id}")
                     db_logger = VectorDbLogger(account_id=account_id, provider="pinecone")
                     # Store context manually since create_log_entry failed
-                    db_logger._index_name = EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX
+                    db_logger._index_name = index_name
                     db_logger._namespace = namespace
                     db_logger._filenames = [filename]
                 else:
                     db_logger = None
             except Exception:
                 db_logger = None
-        
+
+        # Resolve the account's OWN Pinecone API key up front, so ingestion targets
+        # the same per-account Pinecone project the API microservice reads/manages
+        # with (not a global one). Resolved by account_id reference + decrypted in
+        # memory; the key is never placed in the Pub/Sub message or logged. Doing it
+        # before Step 2 also fails fast (no wasted embedding work) if it's missing.
+        pinecone_api_key = pinecone_api_key_for_account(account_id_for_gcs)
+
         # Step 2: Build vectors (parse CSV, or use Q&A pairs from the message)
         logger.info(f"Step 2: Processing source: {filename}")
         try:
@@ -371,17 +382,17 @@ def process_qna_ingest_topic_message(req_or_event: Union[Dict[str, Any], Any], c
         # Step 3: Insert embeddings into Pinecone
         logger.info(
             f"===== Step 3: INGEST START — upserting {len(vectors)} vector(s) "
-            f"into index '{EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}', "
+            f"into index '{index_name}', "
             f"namespace '{namespace}' ====="
         )
         if len(vectors) > 0:
             try:
                 upsert_start = time.monotonic()
-                upsert_vectors(vectors, namespace)
+                upsert_vectors(vectors, namespace, index_name, pinecone_api_key)
                 upsert_elapsed = time.monotonic() - upsert_start
                 logger.info(
                     f"===== Step 3: INGEST COMPLETE — {len(vectors)} vector(s) upserted "
-                    f"to '{EnvironmentVariables.PINECONE_ALL_MINILM_L6_V2_INDEX}'/"
+                    f"to '{index_name}'/"
                     f"'{namespace}' in {upsert_elapsed:.2f}s ====="
                 )
 
